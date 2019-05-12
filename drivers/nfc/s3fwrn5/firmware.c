@@ -336,7 +336,7 @@ static int s3fwrn5_fw_get_base_addr(
 	struct s3fwrn5_fw_cmd_get_bootinfo_rsp *bootinfo, u32 *base_addr)
 {
 	int i;
-	struct {
+	static const struct {
 		u8 version[4];
 		u32 base_addr;
 	} match[] = {
@@ -449,7 +449,6 @@ int s3fwrn5_fw_download(struct s3fwrn5_fw_info *fw_info)
 		SHASH_DESC_ON_STACK(desc, tfm);
 
 		desc->tfm = tfm;
-		desc->flags = CRYPTO_TFM_REQ_MAY_SLEEP;
 
 		ret = crypto_shash_digest(desc, fw->image, image_size,
 					  hash_data);

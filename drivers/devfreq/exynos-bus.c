@@ -436,7 +436,8 @@ static int exynos_bus_probe(struct platform_device *pdev)
 	ondemand_data->downdifferential = 5;
 
 	/* Add devfreq device to monitor and handle the exynos bus */
-	bus->devfreq = devm_devfreq_add_device(dev, profile, "simple_ondemand",
+	bus->devfreq = devm_devfreq_add_device(dev, profile,
+						DEVFREQ_GOV_SIMPLE_ONDEMAND,
 						ondemand_data);
 	if (IS_ERR(bus->devfreq)) {
 		dev_err(dev, "failed to add devfreq device\n");
@@ -488,7 +489,7 @@ passive:
 	passive_data->parent = parent_devfreq;
 
 	/* Add devfreq device for exynos bus with passive governor */
-	bus->devfreq = devm_devfreq_add_device(dev, profile, "passive",
+	bus->devfreq = devm_devfreq_add_device(dev, profile, DEVFREQ_GOV_PASSIVE,
 						passive_data);
 	if (IS_ERR(bus->devfreq)) {
 		dev_err(dev,
@@ -511,6 +512,13 @@ err:
 	clk_disable_unprepare(bus->clk);
 
 	return ret;
+}
+
+static void exynos_bus_shutdown(struct platform_device *pdev)
+{
+	struct exynos_bus *bus = dev_get_drvdata(&pdev->dev);
+
+	devfreq_suspend_device(bus->devfreq);
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -555,6 +563,7 @@ MODULE_DEVICE_TABLE(of, exynos_bus_of_match);
 
 static struct platform_driver exynos_bus_platdrv = {
 	.probe		= exynos_bus_probe,
+	.shutdown	= exynos_bus_shutdown,
 	.driver = {
 		.name	= "exynos-bus",
 		.pm	= &exynos_bus_pm,

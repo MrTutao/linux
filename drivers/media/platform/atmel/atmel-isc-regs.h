@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ATMEL_ISC_REGS_H
 #define __ATMEL_ISC_REGS_H
 
@@ -23,6 +24,8 @@
 #define ISC_PFE_CFG0_HPOL_LOW   BIT(0)
 #define ISC_PFE_CFG0_VPOL_LOW   BIT(1)
 #define ISC_PFE_CFG0_PPOL_LOW   BIT(2)
+#define ISC_PFE_CFG0_CCIR656    BIT(9)
+#define ISC_PFE_CFG0_CCIR_CRC   BIT(10)
 
 #define ISC_PFE_CFG0_MODE_PROGRESSIVE   (0x0 << 4)
 #define ISC_PFE_CFG0_MODE_MASK          GENMASK(6, 4)
@@ -42,6 +45,7 @@
 
 /* ISC Clock Status Register */
 #define ISC_CLKSR               0x00000020
+#define ISC_CLKSR_SIP		BIT(31)
 
 #define ISC_CLK(n)		BIT(n)
 

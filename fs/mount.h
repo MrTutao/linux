@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #include <linux/mount.h>
 #include <linux/seq_file.h>
 #include <linux/poll.h>
@@ -144,4 +145,9 @@ static inline bool is_local_mountpoint(struct dentry *dentry)
 		return false;
 
 	return __is_local_mountpoint(dentry);
+}
+
+static inline bool is_anon_ns(struct mnt_namespace *ns)
+{
+	return ns->seq == 0;
 }

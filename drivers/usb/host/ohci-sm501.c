@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-1.0+
 /*
  * OHCI HCD (Host Controller Driver) for USB.
  *
@@ -125,8 +126,7 @@ static int ohci_hcd_sm501_drv_probe(struct platform_device *pdev)
 
 	retval = dma_declare_coherent_memory(dev, mem->start,
 					 mem->start - mem->parent->start,
-					 resource_size(mem),
-					 DMA_MEMORY_EXCLUSIVE);
+					 resource_size(mem));
 	if (retval) {
 		dev_err(dev, "cannot declare coherent memory\n");
 		goto err1;

@@ -104,6 +104,8 @@
 
 #define DOORBELL_MESSAGE_SIZE	0x08
 
+static DEFINE_SPINLOCK(fsl_rio_doorbell_lock);
+
 struct rio_msg_regs {
 	u32 omr;
 	u32 osr;
@@ -626,8 +628,12 @@ err_out:
 int fsl_rio_doorbell_send(struct rio_mport *mport,
 				int index, u16 destid, u16 data)
 {
+	unsigned long flags;
+
 	pr_debug("fsl_doorbell_send: index %d destid %4.4x data %4.4x\n",
 		 index, destid, data);
+
+	spin_lock_irqsave(&fsl_rio_doorbell_lock, flags);
 
 	/* In the serial version silicons, such as MPC8548, MPC8641,
 	 * below operations is must be.
@@ -637,6 +643,8 @@ int fsl_rio_doorbell_send(struct rio_mport *mport,
 	out_be32(&dbell->dbell_regs->oddpr, destid << 16);
 	out_be32(&dbell->dbell_regs->oddatr, (index << 20) | data);
 	out_be32(&dbell->dbell_regs->odmr, 0x00000001);
+
+	spin_unlock_irqrestore(&fsl_rio_doorbell_lock, flags);
 
 	return 0;
 }
@@ -749,14 +757,13 @@ fsl_open_outb_mbox(struct rio_mport *mport, void *dev_id, int mbox, int entries)
 
 	/* Initialize outbound message descriptor ring */
 	rmu->msg_tx_ring.virt = dma_alloc_coherent(priv->dev,
-				rmu->msg_tx_ring.size * RIO_MSG_DESC_SIZE,
-				&rmu->msg_tx_ring.phys, GFP_KERNEL);
+						   rmu->msg_tx_ring.size * RIO_MSG_DESC_SIZE,
+						   &rmu->msg_tx_ring.phys,
+						   GFP_KERNEL);
 	if (!rmu->msg_tx_ring.virt) {
 		rc = -ENOMEM;
 		goto out_dma;
 	}
-	memset(rmu->msg_tx_ring.virt, 0,
-			rmu->msg_tx_ring.size * RIO_MSG_DESC_SIZE);
 	rmu->msg_tx_ring.tx_slot = 0;
 
 	/* Point dequeue/enqueue pointers at first entry in ring */

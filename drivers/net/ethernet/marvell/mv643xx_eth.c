@@ -1346,9 +1346,9 @@ static void mib_counters_update(struct mv643xx_eth_private *mp)
 	spin_unlock_bh(&mp->mib_counters_lock);
 }
 
-static void mib_counters_timer_wrapper(unsigned long _mp)
+static void mib_counters_timer_wrapper(struct timer_list *t)
 {
-	struct mv643xx_eth_private *mp = (void *)_mp;
+	struct mv643xx_eth_private *mp = from_timer(mp, t, mib_counters_timer);
 	mib_counters_update(mp);
 	mod_timer(&mp->mib_counters_timer, jiffies + 30 * HZ);
 }
@@ -1499,23 +1499,16 @@ mv643xx_eth_get_link_ksettings_phy(struct mv643xx_eth_private *mp,
 				   struct ethtool_link_ksettings *cmd)
 {
 	struct net_device *dev = mp->dev;
-	u32 supported, advertising;
 
 	phy_ethtool_ksettings_get(dev->phydev, cmd);
 
 	/*
 	 * The MAC does not support 1000baseT_Half.
 	 */
-	ethtool_convert_link_mode_to_legacy_u32(&supported,
-						cmd->link_modes.supported);
-	ethtool_convert_link_mode_to_legacy_u32(&advertising,
-						cmd->link_modes.advertising);
-	supported &= ~SUPPORTED_1000baseT_Half;
-	advertising &= ~ADVERTISED_1000baseT_Half;
-	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.supported,
-						supported);
-	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.advertising,
-						advertising);
+	linkmode_clear_bit(ETHTOOL_LINK_MODE_1000baseT_Half_BIT,
+			   cmd->link_modes.supported);
+	linkmode_clear_bit(ETHTOOL_LINK_MODE_1000baseT_Half_BIT,
+			   cmd->link_modes.advertising);
 
 	return 0;
 }
@@ -2321,9 +2314,9 @@ static int mv643xx_eth_poll(struct napi_struct *napi, int budget)
 	return work_done;
 }
 
-static inline void oom_timer_wrapper(unsigned long data)
+static inline void oom_timer_wrapper(struct timer_list *t)
 {
-	struct mv643xx_eth_private *mp = (void *)data;
+	struct mv643xx_eth_private *mp = from_timer(mp, t, rx_oom);
 
 	napi_schedule(&mp->napi);
 }
@@ -2733,17 +2726,17 @@ static int mv643xx_eth_shared_of_add_port(struct platform_device *pdev,
 
 	memset(&res, 0, sizeof(res));
 	if (of_irq_to_resource(pnp, 0, &res) <= 0) {
-		dev_err(&pdev->dev, "missing interrupt on %s\n", pnp->name);
+		dev_err(&pdev->dev, "missing interrupt on %pOFn\n", pnp);
 		return -EINVAL;
 	}
 
 	if (of_property_read_u32(pnp, "reg", &ppd.port_number)) {
-		dev_err(&pdev->dev, "missing reg property on %s\n", pnp->name);
+		dev_err(&pdev->dev, "missing reg property on %pOFn\n", pnp);
 		return -EINVAL;
 	}
 
 	if (ppd.port_number >= 3) {
-		dev_err(&pdev->dev, "invalid reg property on %s\n", pnp->name);
+		dev_err(&pdev->dev, "invalid reg property on %pOFn\n", pnp);
 		return -EINVAL;
 	}
 
@@ -2756,7 +2749,7 @@ static int mv643xx_eth_shared_of_add_port(struct platform_device *pdev,
 	}
 
 	mac_addr = of_get_mac_address(pnp);
-	if (mac_addr)
+	if (!IS_ERR(mac_addr))
 		memcpy(ppd.mac_addr, mac_addr, ETH_ALEN);
 
 	mv643xx_eth_property(pnp, "tx-queue-size", ppd.tx_queue_size);
@@ -2886,7 +2879,7 @@ static int mv643xx_eth_shared_probe(struct platform_device *pdev)
 
 	ret = mv643xx_eth_shared_of_probe(pdev);
 	if (ret)
-		return ret;
+		goto err_put_clk;
 	pd = dev_get_platdata(&pdev->dev);
 
 	msp->tx_csum_limit = (pd != NULL && pd->tx_csum_limit) ?
@@ -2894,6 +2887,11 @@ static int mv643xx_eth_shared_probe(struct platform_device *pdev)
 	infer_hw_params(msp);
 
 	return 0;
+
+err_put_clk:
+	if (!IS_ERR(msp->clk))
+		clk_disable_unprepare(msp->clk);
+	return ret;
 }
 
 static int mv643xx_eth_shared_remove(struct platform_device *pdev)
@@ -3031,10 +3029,12 @@ static void phy_init(struct mv643xx_eth_private *mp, int speed, int duplex)
 		phy->autoneg = AUTONEG_ENABLE;
 		phy->speed = 0;
 		phy->duplex = 0;
-		phy->advertising = phy->supported | ADVERTISED_Autoneg;
+		linkmode_copy(phy->advertising, phy->supported);
+		linkmode_set_bit(ETHTOOL_LINK_MODE_Autoneg_BIT,
+				 phy->advertising);
 	} else {
 		phy->autoneg = AUTONEG_DISABLE;
-		phy->advertising = 0;
+		linkmode_zero(phy->advertising);
 		phy->speed = speed;
 		phy->duplex = duplex;
 	}
@@ -3178,8 +3178,7 @@ static int mv643xx_eth_probe(struct platform_device *pdev)
 
 	mib_counters_clear(mp);
 
-	setup_timer(&mp->mib_counters_timer, mib_counters_timer_wrapper,
-		    (unsigned long)mp);
+	timer_setup(&mp->mib_counters_timer, mib_counters_timer_wrapper, 0);
 	mp->mib_counters_timer.expires = jiffies + 30 * HZ;
 
 	spin_lock_init(&mp->mib_counters_lock);
@@ -3188,7 +3187,7 @@ static int mv643xx_eth_probe(struct platform_device *pdev)
 
 	netif_napi_add(dev, &mp->napi, mv643xx_eth_poll, NAPI_POLL_WEIGHT);
 
-	setup_timer(&mp->rx_oom, oom_timer_wrapper, (unsigned long)mp);
+	timer_setup(&mp->rx_oom, oom_timer_wrapper, 0);
 
 
 	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);

@@ -1,10 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _PROBE_EVENT_H
 #define _PROBE_EVENT_H
 
 #include <linux/compiler.h>
 #include <stdbool.h>
-#include "intlist.h"
-#include "namespaces.h"
+
+struct intlist;
+struct nsinfo;
 
 /* Probe related configurations */
 struct probe_conf {
@@ -26,6 +28,7 @@ struct probe_trace_point {
 	char		*symbol;	/* Base symbol */
 	char		*module;	/* Module name */
 	unsigned long	offset;		/* Offset from symbol */
+	unsigned long	ref_ctr_offset;	/* SDT reference counter offset */
 	unsigned long	address;	/* Actual address of the trace point */
 	bool		retprobe;	/* Return probe flag */
 };

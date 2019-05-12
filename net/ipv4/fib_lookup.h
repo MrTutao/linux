@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _FIB_LOOKUP_H
 #define _FIB_LOOKUP_H
 
@@ -44,6 +45,7 @@ static inline void fib_result_assign(struct fib_result *res,
 {
 	/* we used to play games with refcounts, but we now use RCU */
 	res->fi = fi;
+	res->nhc = fib_info_nhc(fi, 0);
 }
 
 struct fib_prop {

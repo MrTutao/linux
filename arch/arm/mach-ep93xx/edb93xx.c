@@ -28,8 +28,8 @@
 #include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/i2c.h>
-#include <linux/i2c-gpio.h>
 #include <linux/spi/spi.h>
+#include <linux/gpio/machine.h>
 
 #include <sound/cs4271.h>
 
@@ -61,14 +61,6 @@ static struct ep93xx_eth_data __initdata edb93xx_eth_data = {
 /*************************************************************************
  * EDB93xx i2c peripheral handling
  *************************************************************************/
-static struct i2c_gpio_platform_data __initdata edb93xx_i2c_gpio_data = {
-	.sda_pin		= EP93XX_GPIO_LINE_EEDAT,
-	.sda_is_open_drain	= 0,
-	.scl_pin		= EP93XX_GPIO_LINE_EECLK,
-	.scl_is_open_drain	= 0,
-	.udelay			= 0,	/* default to 100 kHz */
-	.timeout		= 0,	/* default to 100 ms */
-};
 
 static struct i2c_board_info __initdata edb93xxa_i2c_board_info[] = {
 	{
@@ -86,13 +78,11 @@ static void __init edb93xx_register_i2c(void)
 {
 	if (machine_is_edb9302a() || machine_is_edb9307a() ||
 	    machine_is_edb9315a()) {
-		ep93xx_register_i2c(&edb93xx_i2c_gpio_data,
-				    edb93xxa_i2c_board_info,
+		ep93xx_register_i2c(edb93xxa_i2c_board_info,
 				    ARRAY_SIZE(edb93xxa_i2c_board_info));
 	} else if (machine_is_edb9302() || machine_is_edb9307()
 		|| machine_is_edb9312() || machine_is_edb9315()) {
-		ep93xx_register_i2c(&edb93xx_i2c_gpio_data,
-				    edb93xx_i2c_board_info,
+		ep93xx_register_i2c(edb93xx_i2c_board_info,
 				    ARRAY_SIZE(edb93xx_i2c_board_info));
 	}
 }
@@ -116,13 +106,16 @@ static struct spi_board_info edb93xx_spi_board_info[] __initdata = {
 	},
 };
 
-static int edb93xx_spi_chipselects[] __initdata = {
-	EP93XX_GPIO_LINE_EGPIO6,
+static struct gpiod_lookup_table edb93xx_spi_cs_gpio_table = {
+	.dev_id = "ep93xx-spi.0",
+	.table = {
+		GPIO_LOOKUP("A", 6, "cs", GPIO_ACTIVE_LOW),
+		{ },
+	},
 };
 
 static struct ep93xx_spi_info edb93xx_spi_info __initdata = {
-	.chipselect	= edb93xx_spi_chipselects,
-	.num_chipselect	= ARRAY_SIZE(edb93xx_spi_chipselects),
+	/* Intentionally left blank */
 };
 
 static void __init edb93xx_register_spi(void)
@@ -134,6 +127,7 @@ static void __init edb93xx_register_spi(void)
 	else if (machine_is_edb9315a())
 		edb93xx_cs4271_data.gpio_nreset = EP93XX_GPIO_LINE_EGPIO14;
 
+	gpiod_add_lookup_table(&edb93xx_spi_cs_gpio_table);
 	ep93xx_register_spi(&edb93xx_spi_info, edb93xx_spi_board_info,
 			    ARRAY_SIZE(edb93xx_spi_board_info));
 }

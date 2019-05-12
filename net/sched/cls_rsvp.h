@@ -97,7 +97,7 @@ struct rsvp_filter {
 
 	u32				handle;
 	struct rsvp_session		*sess;
-	struct rcu_head			rcu;
+	struct rcu_work			rwork;
 };
 
 static inline unsigned int hash_dst(__be32 *dst, u8 protocol, u8 tunnelid)
@@ -282,12 +282,21 @@ static int rsvp_init(struct tcf_proto *tp)
 	return -ENOBUFS;
 }
 
-static void rsvp_delete_filter_rcu(struct rcu_head *head)
+static void __rsvp_delete_filter(struct rsvp_filter *f)
 {
-	struct rsvp_filter *f = container_of(head, struct rsvp_filter, rcu);
-
 	tcf_exts_destroy(&f->exts);
+	tcf_exts_put_net(&f->exts);
 	kfree(f);
+}
+
+static void rsvp_delete_filter_work(struct work_struct *work)
+{
+	struct rsvp_filter *f = container_of(to_rcu_work(work),
+					     struct rsvp_filter,
+					     rwork);
+	rtnl_lock();
+	__rsvp_delete_filter(f);
+	rtnl_unlock();
 }
 
 static void rsvp_delete_filter(struct tcf_proto *tp, struct rsvp_filter *f)
@@ -297,10 +306,14 @@ static void rsvp_delete_filter(struct tcf_proto *tp, struct rsvp_filter *f)
 	 * grace period, since converted-to-rcu actions are relying on that
 	 * in cleanup() callback
 	 */
-	call_rcu(&f->rcu, rsvp_delete_filter_rcu);
+	if (tcf_exts_get_net(&f->exts))
+		tcf_queue_work(&f->rwork, rsvp_delete_filter_work);
+	else
+		__rsvp_delete_filter(f);
 }
 
-static void rsvp_destroy(struct tcf_proto *tp)
+static void rsvp_destroy(struct tcf_proto *tp, bool rtnl_held,
+			 struct netlink_ext_ack *extack)
 {
 	struct rsvp_head *data = rtnl_dereference(tp->root);
 	int h1, h2;
@@ -328,7 +341,8 @@ static void rsvp_destroy(struct tcf_proto *tp)
 	kfree_rcu(data, rcu);
 }
 
-static int rsvp_delete(struct tcf_proto *tp, void *arg, bool *last)
+static int rsvp_delete(struct tcf_proto *tp, void *arg, bool *last,
+		       bool rtnl_held, struct netlink_ext_ack *extack)
 {
 	struct rsvp_head *head = rtnl_dereference(tp->root);
 	struct rsvp_filter *nfp, *f = arg;
@@ -464,7 +478,8 @@ static int rsvp_change(struct net *net, struct sk_buff *in_skb,
 		       struct tcf_proto *tp, unsigned long base,
 		       u32 handle,
 		       struct nlattr **tca,
-		       void **arg, bool ovr)
+		       void **arg, bool ovr, bool rtnl_held,
+		       struct netlink_ext_ack *extack)
 {
 	struct rsvp_head *data = rtnl_dereference(tp->root);
 	struct rsvp_filter *f, *nfp;
@@ -482,14 +497,16 @@ static int rsvp_change(struct net *net, struct sk_buff *in_skb,
 	if (opt == NULL)
 		return handle ? -EINVAL : 0;
 
-	err = nla_parse_nested(tb, TCA_RSVP_MAX, opt, rsvp_policy, NULL);
+	err = nla_parse_nested_deprecated(tb, TCA_RSVP_MAX, opt, rsvp_policy,
+					  NULL);
 	if (err < 0)
 		return err;
 
-	err = tcf_exts_init(&e, TCA_RSVP_ACT, TCA_RSVP_POLICE);
+	err = tcf_exts_init(&e, net, TCA_RSVP_ACT, TCA_RSVP_POLICE);
 	if (err < 0)
 		return err;
-	err = tcf_exts_validate(net, tp, tb, tca[TCA_RATE], &e, ovr);
+	err = tcf_exts_validate(net, tp, tb, tca[TCA_RATE], &e, ovr, true,
+				extack);
 	if (err < 0)
 		goto errout2;
 
@@ -507,7 +524,8 @@ static int rsvp_change(struct net *net, struct sk_buff *in_skb,
 			goto errout2;
 		}
 
-		err = tcf_exts_init(&n->exts, TCA_RSVP_ACT, TCA_RSVP_POLICE);
+		err = tcf_exts_init(&n->exts, net, TCA_RSVP_ACT,
+				    TCA_RSVP_POLICE);
 		if (err < 0) {
 			kfree(n);
 			goto errout2;
@@ -535,7 +553,7 @@ static int rsvp_change(struct net *net, struct sk_buff *in_skb,
 	if (f == NULL)
 		goto errout2;
 
-	err = tcf_exts_init(&f->exts, TCA_RSVP_ACT, TCA_RSVP_POLICE);
+	err = tcf_exts_init(&f->exts, net, TCA_RSVP_ACT, TCA_RSVP_POLICE);
 	if (err < 0)
 		goto errout;
 	h2 = 16;
@@ -641,7 +659,8 @@ errout2:
 	return err;
 }
 
-static void rsvp_walk(struct tcf_proto *tp, struct tcf_walker *arg)
+static void rsvp_walk(struct tcf_proto *tp, struct tcf_walker *arg,
+		      bool rtnl_held)
 {
 	struct rsvp_head *head = rtnl_dereference(tp->root);
 	unsigned int h, h1;
@@ -675,7 +694,7 @@ static void rsvp_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 }
 
 static int rsvp_dump(struct net *net, struct tcf_proto *tp, void *fh,
-		     struct sk_buff *skb, struct tcmsg *t)
+		     struct sk_buff *skb, struct tcmsg *t, bool rtnl_held)
 {
 	struct rsvp_filter *f = fh;
 	struct rsvp_session *s;
@@ -688,7 +707,7 @@ static int rsvp_dump(struct net *net, struct tcf_proto *tp, void *fh,
 
 	t->tcm_handle = f->handle;
 
-	nest = nla_nest_start(skb, TCA_OPTIONS);
+	nest = nla_nest_start_noflag(skb, TCA_OPTIONS);
 	if (nest == NULL)
 		goto nla_put_failure;
 

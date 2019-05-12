@@ -96,7 +96,7 @@ void br_stp_enable_port(struct net_bridge_port *p)
 {
 	br_init_port(p);
 	br_port_state_selection(p->br);
-	br_ifinfo_notify(RTM_NEWLINK, p);
+	br_ifinfo_notify(RTM_NEWLINK, NULL, p);
 }
 
 /* called under bridge lock */
@@ -111,13 +111,14 @@ void br_stp_disable_port(struct net_bridge_port *p)
 	p->topology_change_ack = 0;
 	p->config_pending = 0;
 
-	br_ifinfo_notify(RTM_NEWLINK, p);
+	br_ifinfo_notify(RTM_NEWLINK, NULL, p);
 
 	del_timer(&p->message_age_timer);
 	del_timer(&p->forward_delay_timer);
 	del_timer(&p->hold_timer);
 
-	br_fdb_delete_by_port(br, p, 0, 0);
+	if (!rcu_access_pointer(p->backup_port))
+		br_fdb_delete_by_port(br, p, 0, 0);
 	br_multicast_disable_port(p);
 
 	br_configuration_update(br);

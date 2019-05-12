@@ -28,6 +28,7 @@
 #include <net/netlink.h>
 #include <net/act_api.h>
 #include <net/pkt_cls.h>
+#include <net/sch_generic.h>
 
 #define HTSIZE 256
 
@@ -46,7 +47,7 @@ struct fw_filter {
 #endif /* CONFIG_NET_CLS_IND */
 	struct tcf_exts		exts;
 	struct tcf_proto	*tp;
-	struct rcu_head		rcu;
+	struct rcu_work		rwork;
 };
 
 static u32 fw_hash(u32 handle)
@@ -83,9 +84,11 @@ static int fw_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 			}
 		}
 	} else {
+		struct Qdisc *q = tcf_block_q(tp->chain->block);
+
 		/* Old method: classify the packet using its skb mark. */
 		if (id && (TC_H_MAJ(id) == 0 ||
-			   !(TC_H_MAJ(id ^ tp->q->handle)))) {
+			   !(TC_H_MAJ(id ^ q->handle)))) {
 			res->classid = id;
 			res->class = 0;
 			return 0;
@@ -119,15 +122,25 @@ static int fw_init(struct tcf_proto *tp)
 	return 0;
 }
 
-static void fw_delete_filter(struct rcu_head *head)
+static void __fw_delete_filter(struct fw_filter *f)
 {
-	struct fw_filter *f = container_of(head, struct fw_filter, rcu);
-
 	tcf_exts_destroy(&f->exts);
+	tcf_exts_put_net(&f->exts);
 	kfree(f);
 }
 
-static void fw_destroy(struct tcf_proto *tp)
+static void fw_delete_filter_work(struct work_struct *work)
+{
+	struct fw_filter *f = container_of(to_rcu_work(work),
+					   struct fw_filter,
+					   rwork);
+	rtnl_lock();
+	__fw_delete_filter(f);
+	rtnl_unlock();
+}
+
+static void fw_destroy(struct tcf_proto *tp, bool rtnl_held,
+		       struct netlink_ext_ack *extack)
 {
 	struct fw_head *head = rtnl_dereference(tp->root);
 	struct fw_filter *f;
@@ -141,13 +154,17 @@ static void fw_destroy(struct tcf_proto *tp)
 			RCU_INIT_POINTER(head->ht[h],
 					 rtnl_dereference(f->next));
 			tcf_unbind_filter(tp, &f->res);
-			call_rcu(&f->rcu, fw_delete_filter);
+			if (tcf_exts_get_net(&f->exts))
+				tcf_queue_work(&f->rwork, fw_delete_filter_work);
+			else
+				__fw_delete_filter(f);
 		}
 	}
 	kfree_rcu(head, rcu);
 }
 
-static int fw_delete(struct tcf_proto *tp, void *arg, bool *last)
+static int fw_delete(struct tcf_proto *tp, void *arg, bool *last,
+		     bool rtnl_held, struct netlink_ext_ack *extack)
 {
 	struct fw_head *head = rtnl_dereference(tp->root);
 	struct fw_filter *f = arg;
@@ -166,7 +183,8 @@ static int fw_delete(struct tcf_proto *tp, void *arg, bool *last)
 		if (pfp == f) {
 			RCU_INIT_POINTER(*fp, rtnl_dereference(f->next));
 			tcf_unbind_filter(tp, &f->res);
-			call_rcu(&f->rcu, fw_delete_filter);
+			tcf_exts_get_net(&f->exts);
+			tcf_queue_work(&f->rwork, fw_delete_filter_work);
 			ret = 0;
 			break;
 		}
@@ -192,13 +210,15 @@ static const struct nla_policy fw_policy[TCA_FW_MAX + 1] = {
 
 static int fw_set_parms(struct net *net, struct tcf_proto *tp,
 			struct fw_filter *f, struct nlattr **tb,
-			struct nlattr **tca, unsigned long base, bool ovr)
+			struct nlattr **tca, unsigned long base, bool ovr,
+			struct netlink_ext_ack *extack)
 {
 	struct fw_head *head = rtnl_dereference(tp->root);
 	u32 mask;
 	int err;
 
-	err = tcf_exts_validate(net, tp, tb, tca[TCA_RATE], &f->exts, ovr);
+	err = tcf_exts_validate(net, tp, tb, tca[TCA_RATE], &f->exts, ovr,
+				true, extack);
 	if (err < 0)
 		return err;
 
@@ -210,7 +230,7 @@ static int fw_set_parms(struct net *net, struct tcf_proto *tp,
 #ifdef CONFIG_NET_CLS_IND
 	if (tb[TCA_FW_INDEV]) {
 		int ret;
-		ret = tcf_change_indev(net, tb[TCA_FW_INDEV]);
+		ret = tcf_change_indev(net, tb[TCA_FW_INDEV], extack);
 		if (ret < 0)
 			return ret;
 		f->ifindex = ret;
@@ -231,7 +251,8 @@ static int fw_set_parms(struct net *net, struct tcf_proto *tp,
 static int fw_change(struct net *net, struct sk_buff *in_skb,
 		     struct tcf_proto *tp, unsigned long base,
 		     u32 handle, struct nlattr **tca, void **arg,
-		     bool ovr)
+		     bool ovr, bool rtnl_held,
+		     struct netlink_ext_ack *extack)
 {
 	struct fw_head *head = rtnl_dereference(tp->root);
 	struct fw_filter *f = *arg;
@@ -242,7 +263,8 @@ static int fw_change(struct net *net, struct sk_buff *in_skb,
 	if (!opt)
 		return handle ? -EINVAL : 0; /* Succeed if it is old method. */
 
-	err = nla_parse_nested(tb, TCA_FW_MAX, opt, fw_policy, NULL);
+	err = nla_parse_nested_deprecated(tb, TCA_FW_MAX, opt, fw_policy,
+					  NULL);
 	if (err < 0)
 		return err;
 
@@ -264,13 +286,14 @@ static int fw_change(struct net *net, struct sk_buff *in_skb,
 #endif /* CONFIG_NET_CLS_IND */
 		fnew->tp = f->tp;
 
-		err = tcf_exts_init(&fnew->exts, TCA_FW_ACT, TCA_FW_POLICE);
+		err = tcf_exts_init(&fnew->exts, net, TCA_FW_ACT,
+				    TCA_FW_POLICE);
 		if (err < 0) {
 			kfree(fnew);
 			return err;
 		}
 
-		err = fw_set_parms(net, tp, fnew, tb, tca, base, ovr);
+		err = fw_set_parms(net, tp, fnew, tb, tca, base, ovr, extack);
 		if (err < 0) {
 			tcf_exts_destroy(&fnew->exts);
 			kfree(fnew);
@@ -286,7 +309,8 @@ static int fw_change(struct net *net, struct sk_buff *in_skb,
 		RCU_INIT_POINTER(fnew->next, rtnl_dereference(pfp->next));
 		rcu_assign_pointer(*fp, fnew);
 		tcf_unbind_filter(tp, &f->res);
-		call_rcu(&f->rcu, fw_delete_filter);
+		tcf_exts_get_net(&f->exts);
+		tcf_queue_work(&f->rwork, fw_delete_filter_work);
 
 		*arg = fnew;
 		return err;
@@ -312,13 +336,13 @@ static int fw_change(struct net *net, struct sk_buff *in_skb,
 	if (f == NULL)
 		return -ENOBUFS;
 
-	err = tcf_exts_init(&f->exts, TCA_FW_ACT, TCA_FW_POLICE);
+	err = tcf_exts_init(&f->exts, net, TCA_FW_ACT, TCA_FW_POLICE);
 	if (err < 0)
 		goto errout;
 	f->id = handle;
 	f->tp = tp;
 
-	err = fw_set_parms(net, tp, f, tb, tca, base, ovr);
+	err = fw_set_parms(net, tp, f, tb, tca, base, ovr, extack);
 	if (err < 0)
 		goto errout;
 
@@ -334,7 +358,8 @@ errout:
 	return err;
 }
 
-static void fw_walk(struct tcf_proto *tp, struct tcf_walker *arg)
+static void fw_walk(struct tcf_proto *tp, struct tcf_walker *arg,
+		    bool rtnl_held)
 {
 	struct fw_head *head = rtnl_dereference(tp->root);
 	int h;
@@ -364,7 +389,7 @@ static void fw_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 }
 
 static int fw_dump(struct net *net, struct tcf_proto *tp, void *fh,
-		   struct sk_buff *skb, struct tcmsg *t)
+		   struct sk_buff *skb, struct tcmsg *t, bool rtnl_held)
 {
 	struct fw_head *head = rtnl_dereference(tp->root);
 	struct fw_filter *f = fh;
@@ -378,7 +403,7 @@ static int fw_dump(struct net *net, struct tcf_proto *tp, void *fh,
 	if (!f->res.classid && !tcf_exts_has_actions(&f->exts))
 		return skb->len;
 
-	nest = nla_nest_start(skb, TCA_OPTIONS);
+	nest = nla_nest_start_noflag(skb, TCA_OPTIONS);
 	if (nest == NULL)
 		goto nla_put_failure;
 

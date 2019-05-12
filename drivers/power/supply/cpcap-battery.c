@@ -221,6 +221,9 @@ static int cpcap_battery_cc_raw_div(struct cpcap_battery_ddata *ddata,
 	int avg_current;
 	u32 cc_lsb;
 
+	if (!divider)
+		return 0;
+
 	sample &= 0xffffff;		/* 24-bits, unsigned */
 	offset &= 0x7ff;		/* 10-bits, signed */
 
@@ -586,8 +589,8 @@ static int cpcap_battery_init_irq(struct platform_device *pdev,
 	int irq, error;
 
 	irq = platform_get_irq_byname(pdev, name);
-	if (!irq)
-		return -ENODEV;
+	if (irq < 0)
+		return irq;
 
 	error = devm_request_threaded_irq(ddata->dev, irq, NULL,
 					  cpcap_battery_irq_thread,
@@ -620,7 +623,7 @@ static int cpcap_battery_init_irq(struct platform_device *pdev,
 static int cpcap_battery_init_interrupts(struct platform_device *pdev,
 					 struct cpcap_battery_ddata *ddata)
 {
-	const char * const cpcap_battery_irqs[] = {
+	static const char * const cpcap_battery_irqs[] = {
 		"eol", "lowbph", "lowbpl",
 		"chrgcurr1", "battdetb"
 	};

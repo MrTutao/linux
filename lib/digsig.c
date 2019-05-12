@@ -87,6 +87,12 @@ static int digsig_verify_rsa(struct key *key,
 	down_read(&key->sem);
 	ukp = user_key_payload_locked(key);
 
+	if (!ukp) {
+		/* key was revoked before we acquired its semaphore */
+		err = -EKEYREVOKED;
+		goto err1;
+	}
+
 	if (ukp->datalen < sizeof(*pkh))
 		goto err1;
 
@@ -234,7 +240,6 @@ int digsig_verify(struct key *keyring, const char *sig, int siglen,
 		goto err;
 
 	desc->tfm = shash;
-	desc->flags = CRYPTO_TFM_REQ_MAY_SLEEP;
 
 	crypto_shash_init(desc);
 	crypto_shash_update(desc, data, datalen);

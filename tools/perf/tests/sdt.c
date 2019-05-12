@@ -1,7 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <errno.h>
 #include <stdio.h>
 #include <sys/epoll.h>
 #include <util/evlist.h>
+#include <util/symbol.h>
 #include <linux/filter.h>
 #include "tests.h"
 #include "debug.h"

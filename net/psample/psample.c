@@ -100,6 +100,7 @@ static int psample_nl_cmd_get_group_dumpit(struct sk_buff *msg,
 static const struct genl_ops psample_nl_ops[] = {
 	{
 		.cmd = PSAMPLE_CMD_GET_GROUP,
+		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.dumpit = psample_nl_cmd_get_group_dumpit,
 		/* can be retrieved by unprivileged users */
 	}
@@ -296,6 +297,6 @@ static void __exit psample_module_exit(void)
 module_init(psample_module_init);
 module_exit(psample_module_exit);
 
-MODULE_AUTHOR("Yotam Gigi <yotamg@mellanox.com>");
+MODULE_AUTHOR("Yotam Gigi <yotam.gi@gmail.com>");
 MODULE_DESCRIPTION("netlink channel for packet sampling");
 MODULE_LICENSE("GPL v2");

@@ -39,16 +39,17 @@
 
 #include <linux/atomic.h>
 #include <asm/cpu.h>
+#include <asm/ginvt.h>
 #include <asm/processor.h>
 #include <asm/idle.h>
 #include <asm/r4k-timer.h>
-#include <asm/mips-cpc.h>
+#include <asm/mips-cps.h>
 #include <asm/mmu_context.h>
 #include <asm/time.h>
 #include <asm/setup.h>
 #include <asm/maar.h>
 
-int __cpu_number_map[NR_CPUS];		/* Map physical to logical */
+int __cpu_number_map[CONFIG_MIPS_NR_CPU_NR_MAP];   /* Map physical to logical */
 EXPORT_SYMBOL(__cpu_number_map);
 
 int __cpu_logical_map[NR_CPUS];		/* Map logical to physical */
@@ -66,6 +67,7 @@ EXPORT_SYMBOL(cpu_sibling_map);
 cpumask_t cpu_core_map[NR_CPUS] __read_mostly;
 EXPORT_SYMBOL(cpu_core_map);
 
+static DECLARE_COMPLETION(cpu_starting);
 static DECLARE_COMPLETION(cpu_running);
 
 /*
@@ -374,6 +376,12 @@ asmlinkage void start_secondary(void)
 	cpumask_set_cpu(cpu, &cpu_coherent_mask);
 	notify_cpu_starting(cpu);
 
+	/* Notify boot CPU that we're starting & ready to sync counters */
+	complete(&cpu_starting);
+
+	synchronise_count_slave(cpu);
+
+	/* The CPU is running and counters synchronised, now mark it online */
 	set_cpu_online(cpu, true);
 
 	set_cpu_sibling_map(cpu);
@@ -381,8 +389,11 @@ asmlinkage void start_secondary(void)
 
 	calculate_cpu_foreign_map();
 
+	/*
+	 * Notify boot CPU that we're up & online and it can safely return
+	 * from __cpu_up
+	 */
 	complete(&cpu_running);
-	synchronise_count_slave(cpu);
 
 	/*
 	 * irq will be enabled in ->smp_finish(), enabling it too early
@@ -433,6 +444,8 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 /* preload SMP state for boot cpu */
 void smp_prepare_boot_cpu(void)
 {
+	if (mp_ops->prepare_boot_cpu)
+		mp_ops->prepare_boot_cpu();
 	set_cpu_possible(0, true);
 	set_cpu_online(0, true);
 }
@@ -445,17 +458,17 @@ int __cpu_up(unsigned int cpu, struct task_struct *tidle)
 	if (err)
 		return err;
 
-	/*
-	 * We must check for timeout here, as the CPU will not be marked
-	 * online until the counters are synchronised.
-	 */
-	if (!wait_for_completion_timeout(&cpu_running,
+	/* Wait for CPU to start and be ready to sync counters */
+	if (!wait_for_completion_timeout(&cpu_starting,
 					 msecs_to_jiffies(1000))) {
 		pr_crit("CPU%u: failed to start\n", cpu);
 		return -EIO;
 	}
 
 	synchronise_count_master(cpu);
+
+	/* Wait for CPU to finish startup & mark itself online before return */
+	wait_for_completion(&cpu_running);
 	return 0;
 }
 
@@ -472,12 +485,21 @@ static void flush_tlb_all_ipi(void *info)
 
 void flush_tlb_all(void)
 {
+	if (cpu_has_mmid) {
+		htw_stop();
+		ginvt_full();
+		sync_ginv();
+		instruction_hazard();
+		htw_start();
+		return;
+	}
+
 	on_each_cpu(flush_tlb_all_ipi, NULL, 1);
 }
 
 static void flush_tlb_mm_ipi(void *mm)
 {
-	local_flush_tlb_mm((struct mm_struct *)mm);
+	drop_mmu_context((struct mm_struct *)mm);
 }
 
 /*
@@ -520,17 +542,22 @@ void flush_tlb_mm(struct mm_struct *mm)
 {
 	preempt_disable();
 
-	if ((atomic_read(&mm->mm_users) != 1) || (current->mm != mm)) {
+	if (cpu_has_mmid) {
+		/*
+		 * No need to worry about other CPUs - the ginvt in
+		 * drop_mmu_context() will be globalized.
+		 */
+	} else if ((atomic_read(&mm->mm_users) != 1) || (current->mm != mm)) {
 		smp_on_other_tlbs(flush_tlb_mm_ipi, mm);
 	} else {
 		unsigned int cpu;
 
 		for_each_online_cpu(cpu) {
 			if (cpu != smp_processor_id() && cpu_context(cpu, mm))
-				cpu_context(cpu, mm) = 0;
+				set_cpu_context(cpu, mm, 0);
 		}
 	}
-	local_flush_tlb_mm(mm);
+	drop_mmu_context(mm);
 
 	preempt_enable();
 }
@@ -551,9 +578,26 @@ static void flush_tlb_range_ipi(void *info)
 void flush_tlb_range(struct vm_area_struct *vma, unsigned long start, unsigned long end)
 {
 	struct mm_struct *mm = vma->vm_mm;
+	unsigned long addr;
+	u32 old_mmid;
 
 	preempt_disable();
-	if ((atomic_read(&mm->mm_users) != 1) || (current->mm != mm)) {
+	if (cpu_has_mmid) {
+		htw_stop();
+		old_mmid = read_c0_memorymapid();
+		write_c0_memorymapid(cpu_asid(0, mm));
+		mtc0_tlbw_hazard();
+		addr = round_down(start, PAGE_SIZE * 2);
+		end = round_up(end, PAGE_SIZE * 2);
+		do {
+			ginvt_va_mmid(addr);
+			sync_ginv();
+			addr += PAGE_SIZE * 2;
+		} while (addr < end);
+		write_c0_memorymapid(old_mmid);
+		instruction_hazard();
+		htw_start();
+	} else if ((atomic_read(&mm->mm_users) != 1) || (current->mm != mm)) {
 		struct flush_tlb_data fd = {
 			.vma = vma,
 			.addr1 = start,
@@ -561,6 +605,7 @@ void flush_tlb_range(struct vm_area_struct *vma, unsigned long start, unsigned l
 		};
 
 		smp_on_other_tlbs(flush_tlb_range_ipi, &fd);
+		local_flush_tlb_range(vma, start, end);
 	} else {
 		unsigned int cpu;
 		int exec = vma->vm_flags & VM_EXEC;
@@ -573,10 +618,10 @@ void flush_tlb_range(struct vm_area_struct *vma, unsigned long start, unsigned l
 			 * mm has been completely unused by that CPU.
 			 */
 			if (cpu != smp_processor_id() && cpu_context(cpu, mm))
-				cpu_context(cpu, mm) = !exec;
+				set_cpu_context(cpu, mm, !exec);
 		}
+		local_flush_tlb_range(vma, start, end);
 	}
-	local_flush_tlb_range(vma, start, end);
 	preempt_enable();
 }
 
@@ -606,14 +651,28 @@ static void flush_tlb_page_ipi(void *info)
 
 void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 {
+	u32 old_mmid;
+
 	preempt_disable();
-	if ((atomic_read(&vma->vm_mm->mm_users) != 1) || (current->mm != vma->vm_mm)) {
+	if (cpu_has_mmid) {
+		htw_stop();
+		old_mmid = read_c0_memorymapid();
+		write_c0_memorymapid(cpu_asid(0, vma->vm_mm));
+		mtc0_tlbw_hazard();
+		ginvt_va_mmid(page);
+		sync_ginv();
+		write_c0_memorymapid(old_mmid);
+		instruction_hazard();
+		htw_start();
+	} else if ((atomic_read(&vma->vm_mm->mm_users) != 1) ||
+		   (current->mm != vma->vm_mm)) {
 		struct flush_tlb_data fd = {
 			.vma = vma,
 			.addr1 = page,
 		};
 
 		smp_on_other_tlbs(flush_tlb_page_ipi, &fd);
+		local_flush_tlb_page(vma, page);
 	} else {
 		unsigned int cpu;
 
@@ -625,10 +684,10 @@ void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 			 * by that CPU.
 			 */
 			if (cpu != smp_processor_id() && cpu_context(cpu, vma->vm_mm))
-				cpu_context(cpu, vma->vm_mm) = 1;
+				set_cpu_context(cpu, vma->vm_mm, 1);
 		}
+		local_flush_tlb_page(vma, page);
 	}
-	local_flush_tlb_page(vma, page);
 	preempt_enable();
 }
 

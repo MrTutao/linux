@@ -22,6 +22,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#include <linux/bitops.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
@@ -45,6 +46,7 @@ static const unsigned short normal_i2c[] = {
 #define JC42_REG_TEMP		0x05
 #define JC42_REG_MANID		0x06
 #define JC42_REG_DEVICEID	0x07
+#define JC42_REG_SMBUS		0x22 /* NXP and Atmel, possibly others? */
 
 /* Status bits in temperature register */
 #define JC42_ALARM_CRIT_BIT	15
@@ -74,6 +76,9 @@ static const unsigned short normal_i2c[] = {
 #define STM_MANID		0x104a  /* ST Microelectronics */
 #define GT_MANID		0x1c68	/* Giantec */
 #define GT_MANID2		0x132d	/* Giantec, 2nd mfg ID */
+
+/* SMBUS register */
+#define SMBUS_STMOUT		BIT(7)  /* SMBus time-out, active low */
 
 /* Supported chips */
 
@@ -385,21 +390,21 @@ static umode_t jc42_is_visible(const void *_data, enum hwmon_sensor_types type,
 {
 	const struct jc42_data *data = _data;
 	unsigned int config = data->config;
-	umode_t mode = S_IRUGO;
+	umode_t mode = 0444;
 
 	switch (attr) {
 	case hwmon_temp_min:
 	case hwmon_temp_max:
 		if (!(config & JC42_CFG_EVENT_LOCK))
-			mode |= S_IWUSR;
+			mode |= 0200;
 		break;
 	case hwmon_temp_crit:
 		if (!(config & JC42_CFG_TCRIT_LOCK))
-			mode |= S_IWUSR;
+			mode |= 0200;
 		break;
 	case hwmon_temp_crit_hyst:
 		if (!(config & (JC42_CFG_EVENT_LOCK | JC42_CFG_TCRIT_LOCK)))
-			mode |= S_IWUSR;
+			mode |= 0200;
 		break;
 	case hwmon_temp_input:
 	case hwmon_temp_max_hyst:
@@ -446,20 +451,12 @@ static int jc42_detect(struct i2c_client *client, struct i2c_board_info *info)
 	return -ENODEV;
 }
 
-static const u32 jc42_temp_config[] = {
-	HWMON_T_INPUT | HWMON_T_MIN | HWMON_T_MAX | HWMON_T_CRIT |
-	HWMON_T_MAX_HYST | HWMON_T_CRIT_HYST |
-	HWMON_T_MIN_ALARM | HWMON_T_MAX_ALARM | HWMON_T_CRIT_ALARM,
-	0
-};
-
-static const struct hwmon_channel_info jc42_temp = {
-	.type = hwmon_temp,
-	.config = jc42_temp_config,
-};
-
 static const struct hwmon_channel_info *jc42_info[] = {
-	&jc42_temp,
+	HWMON_CHANNEL_INFO(temp,
+			   HWMON_T_INPUT | HWMON_T_MIN | HWMON_T_MAX |
+			   HWMON_T_CRIT | HWMON_T_MAX_HYST |
+			   HWMON_T_CRIT_HYST | HWMON_T_MIN_ALARM |
+			   HWMON_T_MAX_ALARM | HWMON_T_CRIT_ALARM),
 	NULL
 };
 
@@ -494,6 +491,22 @@ static int jc42_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		return cap;
 
 	data->extended = !!(cap & JC42_CAP_RANGE);
+
+	if (device_property_read_bool(dev, "smbus-timeout-disable")) {
+		int smbus;
+
+		/*
+		 * Not all chips support this register, but from a
+		 * quick read of various datasheets no chip appears
+		 * incompatible with the below attempt to disable
+		 * the timeout. And the whole thing is opt-in...
+		 */
+		smbus = i2c_smbus_read_word_swapped(client, JC42_REG_SMBUS);
+		if (smbus < 0)
+			return smbus;
+		i2c_smbus_write_word_swapped(client, JC42_REG_SMBUS,
+					     smbus | SMBUS_STMOUT);
+	}
 
 	config = i2c_smbus_read_word_swapped(client, JC42_REG_CONFIG);
 	if (config < 0)

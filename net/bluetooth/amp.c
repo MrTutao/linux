@@ -161,7 +161,6 @@ static int hmac_sha256(u8 *key, u8 ksize, char *plaintext, u8 psize, u8 *output)
 	}
 
 	shash->tfm = tfm;
-	shash->flags = CRYPTO_TFM_REQ_MAY_SLEEP;
 
 	ret = crypto_shash_digest(shash, plaintext, psize, output);
 
@@ -187,7 +186,7 @@ int phylink_gen_key(struct hci_conn *conn, u8 *data, u8 *len, u8 *type)
 
 	/* Legacy key */
 	if (conn->key_type < 3) {
-		BT_ERR("Legacy key type %d", conn->key_type);
+		bt_dev_err(hdev, "legacy key type %d", conn->key_type);
 		return -EACCES;
 	}
 
@@ -207,7 +206,7 @@ int phylink_gen_key(struct hci_conn *conn, u8 *data, u8 *len, u8 *type)
 	/* Derive Generic AMP Link Key (gamp) */
 	err = hmac_sha256(keybuf, HCI_AMP_LINK_KEY_SIZE, "gamp", 4, gamp_key);
 	if (err) {
-		BT_ERR("Could not derive Generic AMP Key: err %d", err);
+		bt_dev_err(hdev, "could not derive Generic AMP Key: err %d", err);
 		return err;
 	}
 

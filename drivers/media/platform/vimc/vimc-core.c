@@ -24,7 +24,6 @@
 
 #include "vimc-common.h"
 
-#define VIMC_PDEV_NAME "vimc"
 #define VIMC_MDEV_MODEL_NAME "VIMC MDEV"
 
 #define VIMC_ENT_LINK(src, srcpad, sink, sinkpad, link_flags) {	\
@@ -221,6 +220,7 @@ static int vimc_comp_bind(struct device *master)
 
 err_mdev_unregister:
 	media_device_unregister(&vimc->mdev);
+	media_device_cleanup(&vimc->mdev);
 err_comp_unbind_all:
 	component_unbind_all(master, NULL);
 err_v4l2_unregister:
@@ -237,6 +237,7 @@ static void vimc_comp_unbind(struct device *master)
 	dev_dbg(master, "unbind");
 
 	media_device_unregister(&vimc->mdev);
+	media_device_cleanup(&vimc->mdev);
 	component_unbind_all(master, NULL);
 	v4l2_device_unregister(&vimc->v4l2_dev);
 }
@@ -259,7 +260,7 @@ static struct component_match *vimc_add_subdevs(struct vimc_device *vimc)
 		dev_dbg(&vimc->pdev.dev, "new pdev for %s\n",
 			vimc->pipe_cfg->ents[i].drv);
 
-		strlcpy(pdata.entity_name, vimc->pipe_cfg->ents[i].name,
+		strscpy(pdata.entity_name, vimc->pipe_cfg->ents[i].name,
 			sizeof(pdata.entity_name));
 
 		vimc->subdevs[i] = platform_device_register_data(&vimc->pdev.dev,
@@ -267,11 +268,12 @@ static struct component_match *vimc_add_subdevs(struct vimc_device *vimc)
 						PLATFORM_DEVID_AUTO,
 						&pdata,
 						sizeof(pdata));
-		if (!vimc->subdevs[i]) {
+		if (IS_ERR(vimc->subdevs[i])) {
+			match = ERR_CAST(vimc->subdevs[i]);
 			while (--i >= 0)
 				platform_device_unregister(vimc->subdevs[i]);
 
-			return ERR_PTR(-ENOMEM);
+			return match;
 		}
 
 		component_match_add(&vimc->pdev.dev, &match, vimc_comp_compare,
@@ -302,6 +304,8 @@ static int vimc_probe(struct platform_device *pdev)
 
 	dev_dbg(&pdev->dev, "probe");
 
+	memset(&vimc->mdev, 0, sizeof(vimc->mdev));
+
 	/* Create platform_device for each entity in the topology*/
 	vimc->subdevs = devm_kcalloc(&vimc->pdev.dev, vimc->pipe_cfg->num_ents,
 				     sizeof(*vimc->subdevs), GFP_KERNEL);
@@ -316,8 +320,10 @@ static int vimc_probe(struct platform_device *pdev)
 	vimc->v4l2_dev.mdev = &vimc->mdev;
 
 	/* Initialize media device */
-	strlcpy(vimc->mdev.model, VIMC_MDEV_MODEL_NAME,
+	strscpy(vimc->mdev.model, VIMC_MDEV_MODEL_NAME,
 		sizeof(vimc->mdev.model));
+	snprintf(vimc->mdev.bus_info, sizeof(vimc->mdev.bus_info),
+		 "platform:%s", VIMC_PDEV_NAME);
 	vimc->mdev.dev = &pdev->dev;
 	media_device_init(&vimc->mdev);
 
@@ -327,7 +333,6 @@ static int vimc_probe(struct platform_device *pdev)
 	if (ret) {
 		media_device_cleanup(&vimc->mdev);
 		vimc_rm_subdevs(vimc);
-		kfree(vimc);
 		return ret;
 	}
 
