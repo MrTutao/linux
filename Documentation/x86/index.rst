@@ -19,10 +19,12 @@ x86-specific Documentation
    tlb
    mtrr
    pat
-   protection-keys
    intel_mpx
+   intel-iommu
+   intel_txt
    amd-memory-encryption
    pti
+   mds
    microcode
    resctrl_ui
    usb-legacy-support

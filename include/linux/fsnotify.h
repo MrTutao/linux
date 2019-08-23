@@ -152,39 +152,6 @@ static inline void fsnotify_vfsmount_delete(struct vfsmount *mnt)
 }
 
 /*
- * fsnotify_nameremove - a filename was removed from a directory
- *
- * This is mostly called under parent vfs inode lock so name and
- * dentry->d_parent should be stable. However there are some corner cases where
- * inode lock is not held. So to be on the safe side and be reselient to future
- * callers and out of tree users of d_delete(), we do not assume that d_parent
- * and d_name are stable and we use dget_parent() and
- * take_dentry_name_snapshot() to grab stable references.
- */
-static inline void fsnotify_nameremove(struct dentry *dentry, int isdir)
-{
-	struct dentry *parent;
-	struct name_snapshot name;
-	__u32 mask = FS_DELETE;
-
-	/* d_delete() of pseudo inode? (e.g. __ns_get_path() playing tricks) */
-	if (IS_ROOT(dentry))
-		return;
-
-	if (isdir)
-		mask |= FS_ISDIR;
-
-	parent = dget_parent(dentry);
-	take_dentry_name_snapshot(&name, dentry);
-
-	fsnotify(d_inode(parent), mask, d_inode(dentry), FSNOTIFY_EVENT_INODE,
-		 &name.name, 0);
-
-	release_dentry_name_snapshot(&name);
-	dput(parent);
-}
-
-/*
  * fsnotify_inoderemove - an inode is going away
  */
 static inline void fsnotify_inoderemove(struct inode *inode)
@@ -222,6 +189,19 @@ static inline void fsnotify_link(struct inode *dir, struct inode *inode, struct 
 }
 
 /*
+ * fsnotify_unlink - 'name' was unlinked
+ *
+ * Caller must make sure that dentry->d_name is stable.
+ */
+static inline void fsnotify_unlink(struct inode *dir, struct dentry *dentry)
+{
+	/* Expected to be called before d_delete() */
+	WARN_ON_ONCE(d_is_negative(dentry));
+
+	fsnotify_dirent(dir, dentry, FS_DELETE);
+}
+
+/*
  * fsnotify_mkdir - directory 'name' was created
  */
 static inline void fsnotify_mkdir(struct inode *inode, struct dentry *dentry)
@@ -229,6 +209,19 @@ static inline void fsnotify_mkdir(struct inode *inode, struct dentry *dentry)
 	audit_inode_child(inode, dentry, AUDIT_TYPE_CHILD_CREATE);
 
 	fsnotify_dirent(inode, dentry, FS_CREATE | FS_ISDIR);
+}
+
+/*
+ * fsnotify_rmdir - directory 'name' was removed
+ *
+ * Caller must make sure that dentry->d_name is stable.
+ */
+static inline void fsnotify_rmdir(struct inode *dir, struct dentry *dentry)
+{
+	/* Expected to be called before d_delete() */
+	WARN_ON_ONCE(d_is_negative(dentry));
+
+	fsnotify_dirent(dir, dentry, FS_DELETE | FS_ISDIR);
 }
 
 /*

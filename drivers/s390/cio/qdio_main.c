@@ -205,17 +205,22 @@ static inline int get_buf_states(struct qdio_q *q, unsigned int bufnr,
 				 int auto_ack, int merge_pending)
 {
 	unsigned char __state = 0;
-	int i;
+	int i = 1;
 
 	if (is_qebsm(q))
 		return qdio_do_eqbs(q, state, bufnr, count, auto_ack);
 
 	/* get initial state: */
 	__state = q->slsb.val[bufnr];
+
+	/* Bail out early if there is no work on the queue: */
+	if (__state & SLSB_OWNER_CU)
+		goto out;
+
 	if (merge_pending && __state == SLSB_P_OUTPUT_PENDING)
 		__state = SLSB_P_OUTPUT_EMPTY;
 
-	for (i = 1; i < count; i++) {
+	for (; i < count; i++) {
 		bufnr = next_buf(bufnr);
 
 		/* merge PENDING into EMPTY: */
@@ -228,6 +233,8 @@ static inline int get_buf_states(struct qdio_q *q, unsigned int bufnr,
 		if (q->slsb.val[bufnr] != __state)
 			break;
 	}
+
+out:
 	*state = __state;
 	return i;
 }
@@ -312,9 +319,7 @@ static int qdio_siga_output(struct qdio_q *q, unsigned int *busy_bit,
 	int retries = 0, cc;
 	unsigned long laob = 0;
 
-	WARN_ON_ONCE(aob && ((queue_type(q) != QDIO_IQDIO_QFMT) ||
-			     !q->u.out.use_cq));
-	if (q->u.out.use_cq && aob != 0) {
+	if (aob) {
 		fc = QDIO_SIGA_WRITEQ;
 		laob = aob;
 	}
@@ -382,7 +387,7 @@ int debug_get_buf_state(struct qdio_q *q, unsigned int bufnr,
 {
 	if (need_siga_sync(q))
 		qdio_siga_sync_q(q);
-	return get_buf_states(q, bufnr, state, 1, 0, 0);
+	return get_buf_state(q, bufnr, state, 0);
 }
 
 static inline void qdio_stop_polling(struct qdio_q *q)
@@ -614,9 +619,6 @@ static inline unsigned long qdio_aob_for_buffer(struct qdio_output_q *q,
 {
 	unsigned long phys_aob = 0;
 
-	if (!q->use_cq)
-		return 0;
-
 	if (!q->aobs[bufnr]) {
 		struct qaob *aob = qdio_allocate_aob();
 		q->aobs[bufnr] = aob;
@@ -719,11 +721,7 @@ static int get_outbound_buffer_frontier(struct qdio_q *q, unsigned int start)
 		    multicast_outbound(q)))
 			qdio_siga_sync_q(q);
 
-	/*
-	 * Don't check 128 buffers, as otherwise qdio_inbound_q_moved
-	 * would return 0.
-	 */
-	count = min(atomic_read(&q->nr_buf_used), QDIO_MAX_BUFFERS_MASK);
+	count = atomic_read(&q->nr_buf_used);
 	if (!count)
 		return 0;
 
@@ -733,6 +731,7 @@ static int get_outbound_buffer_frontier(struct qdio_q *q, unsigned int start)
 
 	switch (state) {
 	case SLSB_P_OUTPUT_EMPTY:
+	case SLSB_P_OUTPUT_PENDING:
 		/* the adapter got it */
 		DBF_DEV_EVENT(DBF_INFO, q->irq_ptr,
 			"out empty:%1d %02x", q->nr, count);
@@ -1304,6 +1303,8 @@ static void qdio_detect_hsicq(struct qdio_irq *irq_ptr)
 
 	for_each_output_queue(irq_ptr, q, i) {
 		if (use_cq) {
+			if (multicast_outbound(q))
+				continue;
 			if (qdio_enable_async_operation(&q->u.out) < 0) {
 				use_cq = 0;
 				continue;
@@ -1549,18 +1550,19 @@ static int handle_outbound(struct qdio_q *q, unsigned int callflags,
 		/* One SIGA-W per buffer required for unicast HSI */
 		WARN_ON_ONCE(count > 1 && !multicast_outbound(q));
 
-		phys_aob = qdio_aob_for_buffer(&q->u.out, bufnr);
+		if (q->u.out.use_cq)
+			phys_aob = qdio_aob_for_buffer(&q->u.out, bufnr);
 
 		rc = qdio_kick_outbound_q(q, phys_aob);
 	} else if (need_siga_sync(q)) {
 		rc = qdio_siga_sync_q(q);
+	} else if (count < QDIO_MAX_BUFFERS_PER_Q &&
+		   get_buf_state(q, prev_buf(bufnr), &state, 0) > 0 &&
+		   state == SLSB_CU_OUTPUT_PRIMED) {
+		/* The previous buffer is not processed yet, tack on. */
+		qperf_inc(q, fast_requeue);
 	} else {
-		/* try to fast requeue buffers */
-		get_buf_state(q, prev_buf(bufnr), &state, 0);
-		if (state != SLSB_CU_OUTPUT_PRIMED)
-			rc = qdio_kick_outbound_q(q, 0);
-		else
-			qperf_inc(q, fast_requeue);
+		rc = qdio_kick_outbound_q(q, 0);
 	}
 
 	/* in case of SIGA errors we must process the error immediately */

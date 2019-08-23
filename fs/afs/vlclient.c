@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* AFS Volume Location Service client
  *
  * Copyright (C) 2002 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/gfp.h>
@@ -34,7 +30,7 @@ static int afs_deliver_vl_get_entry_by_name_u(struct afs_call *call)
 
 	/* unmarshall the reply once we've received all of it */
 	uvldb = call->buffer;
-	entry = call->reply[0];
+	entry = call->ret_vldb;
 
 	nr_servers = ntohl(uvldb->nServers);
 	if (nr_servers > AFS_NMAXNSERVERS)
@@ -60,23 +56,24 @@ static int afs_deliver_vl_get_entry_by_name_u(struct afs_call *call)
 		struct afs_uuid__xdr *xdr;
 		struct afs_uuid *uuid;
 		int j;
+		int n = entry->nr_servers;
 
 		tmp = ntohl(uvldb->serverFlags[i]);
 		if (tmp & AFS_VLSF_DONTUSE ||
 		    (new_only && !(tmp & AFS_VLSF_NEWREPSITE)))
 			continue;
 		if (tmp & AFS_VLSF_RWVOL) {
-			entry->fs_mask[i] |= AFS_VOL_VTM_RW;
+			entry->fs_mask[n] |= AFS_VOL_VTM_RW;
 			if (vlflags & AFS_VLF_BACKEXISTS)
-				entry->fs_mask[i] |= AFS_VOL_VTM_BAK;
+				entry->fs_mask[n] |= AFS_VOL_VTM_BAK;
 		}
 		if (tmp & AFS_VLSF_ROVOL)
-			entry->fs_mask[i] |= AFS_VOL_VTM_RO;
-		if (!entry->fs_mask[i])
+			entry->fs_mask[n] |= AFS_VOL_VTM_RO;
+		if (!entry->fs_mask[n])
 			continue;
 
 		xdr = &uvldb->serverNumber[i];
-		uuid = (struct afs_uuid *)&entry->fs_server[i];
+		uuid = (struct afs_uuid *)&entry->fs_server[n];
 		uuid->time_low			= xdr->time_low;
 		uuid->time_mid			= htons(ntohl(xdr->time_mid));
 		uuid->time_hi_and_version	= htons(ntohl(xdr->time_hi_and_version));
@@ -110,7 +107,7 @@ static int afs_deliver_vl_get_entry_by_name_u(struct afs_call *call)
 
 static void afs_destroy_vl_get_entry_by_name_u(struct afs_call *call)
 {
-	kfree(call->reply[0]);
+	kfree(call->ret_vldb);
 	afs_flat_call_destructor(call);
 }
 
@@ -155,8 +152,8 @@ struct afs_vldb_entry *afs_vl_get_entry_by_name_u(struct afs_vl_cursor *vc,
 	}
 
 	call->key = vc->key;
-	call->reply[0] = entry;
-	call->ret_reply0 = true;
+	call->ret_vldb = entry;
+	call->max_lifespan = AFS_VL_MAX_LIFESPAN;
 
 	/* Marshall the parameters */
 	bp = call->request;
@@ -214,7 +211,7 @@ static int afs_deliver_vl_get_addrs_u(struct afs_call *call)
 		if (!alist)
 			return -ENOMEM;
 		alist->version = uniquifier;
-		call->reply[0] = alist;
+		call->ret_alist = alist;
 		call->count = count;
 		call->count2 = nentries;
 		call->unmarshall++;
@@ -229,7 +226,7 @@ static int afs_deliver_vl_get_addrs_u(struct afs_call *call)
 		if (ret < 0)
 			return ret;
 
-		alist = call->reply[0];
+		alist = call->ret_alist;
 		bp = call->buffer;
 		count = min(call->count, 4U);
 		for (i = 0; i < count; i++)
@@ -249,8 +246,7 @@ static int afs_deliver_vl_get_addrs_u(struct afs_call *call)
 
 static void afs_vl_get_addrs_u_destructor(struct afs_call *call)
 {
-	afs_put_server(call->net, (struct afs_server *)call->reply[0]);
-	kfree(call->reply[1]);
+	afs_put_addrlist(call->ret_alist);
 	return afs_flat_call_destructor(call);
 }
 
@@ -287,8 +283,8 @@ struct afs_addr_list *afs_vl_get_addrs_u(struct afs_vl_cursor *vc,
 		return ERR_PTR(-ENOMEM);
 
 	call->key = vc->key;
-	call->reply[0] = NULL;
-	call->ret_reply0 = true;
+	call->ret_alist = NULL;
+	call->max_lifespan = AFS_VL_MAX_LIFESPAN;
 
 	/* Marshall the parameters */
 	bp = call->request;
@@ -358,9 +354,7 @@ static int afs_deliver_vl_get_capabilities(struct afs_call *call)
 
 static void afs_destroy_vl_get_capabilities(struct afs_call *call)
 {
-	struct afs_vlserver *server = call->reply[0];
-
-	afs_put_vlserver(call->net, server);
+	afs_put_vlserver(call->net, call->vlserver);
 	afs_flat_call_destructor(call);
 }
 
@@ -398,11 +392,11 @@ struct afs_call *afs_vl_get_capabilities(struct afs_net *net,
 		return ERR_PTR(-ENOMEM);
 
 	call->key = key;
-	call->reply[0] = afs_get_vlserver(server);
-	call->reply[1] = (void *)(long)server_index;
+	call->vlserver = afs_get_vlserver(server);
+	call->server_index = server_index;
 	call->upgrade = true;
-	call->want_reply_time = true;
 	call->async = true;
+	call->max_lifespan = AFS_PROBE_MAX_LIFESPAN;
 
 	/* marshall the parameters */
 	bp = call->request;
@@ -460,7 +454,7 @@ static int afs_deliver_yfsvl_get_endpoints(struct afs_call *call)
 		if (!alist)
 			return -ENOMEM;
 		alist->version = uniquifier;
-		call->reply[0] = alist;
+		call->ret_alist = alist;
 
 		if (call->count == 0)
 			goto extract_volendpoints;
@@ -488,7 +482,7 @@ static int afs_deliver_yfsvl_get_endpoints(struct afs_call *call)
 		if (ret < 0)
 			return ret;
 
-		alist = call->reply[0];
+		alist = call->ret_alist;
 		bp = call->buffer;
 		switch (call->count2) {
 		case YFS_ENDPOINT_IPV4:
@@ -609,7 +603,6 @@ static int afs_deliver_yfsvl_get_endpoints(struct afs_call *call)
 		break;
 	}
 
-	alist = call->reply[0];
 	_leave(" = 0 [done]");
 	return 0;
 }
@@ -644,8 +637,8 @@ struct afs_addr_list *afs_yfsvl_get_endpoints(struct afs_vl_cursor *vc,
 		return ERR_PTR(-ENOMEM);
 
 	call->key = vc->key;
-	call->reply[0] = NULL;
-	call->ret_reply0 = true;
+	call->ret_alist = NULL;
+	call->max_lifespan = AFS_VL_MAX_LIFESPAN;
 
 	/* Marshall the parameters */
 	bp = call->request;
